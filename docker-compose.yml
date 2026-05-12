@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3000
+      - JWT_SECRET=gateway-secret-key
+    depends_on:
+      - redis
+
+  matchmaking:
+    build:
+      context: .
+      dockerfile: services/matchmaking/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3001
+    depends_on:
+      - redis
+
+  lobby:
+    build:
+      context: .
+      dockerfile: services/lobby/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3002
+    depends_on:
+      - redis
+
+  game-session:
+    build:
+      context: .
+      dockerfile: services/game-session/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3003
+    depends_on:
+      - redis
+
+  leaderboard:
+    build:
+      context: .
+      dockerfile: services/leaderboard/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3004
+    depends_on:
+      - redis
+
+  chat:
+    build:
+      context: .
+      dockerfile: services/chat/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3005
+    depends_on:
+      - redis
+
+  notification:
+    build:
+      context: .
+      dockerfile: services/notification/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3006
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:
