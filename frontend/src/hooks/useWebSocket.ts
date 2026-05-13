@@ -53,8 +53,16 @@ export function useWebSocket() {
         break
 
       case 'lobby.player_joined':
-      case 'lobby.player_left':
         updateLobbyPlayers(msg.data.players)
+        break
+
+      case 'lobby.player_left':
+        if (msg.data.is_self) {
+          setCurrentLobby(null)
+          navigate('/')
+        } else {
+          updateLobbyPlayers(msg.data.players)
+        }
         break
 
       case 'lobby.all_ready':

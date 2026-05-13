@@ -1,14 +1,13 @@
-export interface Player {
-  player_id: string
+export interface LobbyPlayer {
+  id: string
   username: string
-  status?: string
 }
 
 export interface Lobby {
   id: string
   name: string
   host_id: string
-  players: string[]
+  players: LobbyPlayer[]
   max_players: number
   game_mode: string
   is_ready: boolean
@@ -71,8 +70,8 @@ export type WSMessage =
   | { type: 'matchmaking.queued'; data: { message: string } }
   | { type: 'match.found'; data: Match }
   | { type: 'lobby.created'; data: { lobby_id: string; lobby: Lobby } }
-  | { type: 'lobby.player_joined'; data: { lobby_id: string; player_id: string; players: string[] } }
-  | { type: 'lobby.player_left'; data: { lobby_id: string; player_id: string; players: string[] } }
+  | { type: 'lobby.player_joined'; data: { lobby_id: string; player_id: string; players: LobbyPlayer[] } }
+  | { type: 'lobby.player_left'; data: { lobby_id: string; player_id: string; players: LobbyPlayer[]; is_self?: boolean } }
   | { type: 'lobby.all_ready'; data: { lobby_id: string; message: string } }
   | { type: 'lobby.join_failed'; data: { message: string } }
   | { type: 'session.started'; data: { session_id: string; state: GameState } }

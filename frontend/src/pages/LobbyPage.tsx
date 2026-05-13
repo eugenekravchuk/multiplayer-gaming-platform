@@ -115,21 +115,22 @@ export default function LobbyPage() {
               </div>
 
               <div className="p-5 space-y-3">
-                {currentLobby.players.map((pid, i) => (
-                  <div key={pid} className="flex items-center gap-3 p-3 bg-surface-700/50 rounded-lg">
+                {currentLobby.players.map((player, i) => (
+                  <div key={player.id} className="flex items-center gap-3 p-3 bg-surface-700/50 rounded-lg">
                     <div className="w-8 h-8 rounded-full bg-brand-600/60 flex items-center justify-center text-sm font-bold">
                       {i + 1}
                     </div>
                     <div className="flex-1">
-                      <p className="text-sm text-slate-300 font-mono">{pid.slice(-12)}</p>
+                      <p className="text-sm font-bold text-white">{player.username}</p>
+                      <p className="text-[10px] text-slate-500 font-mono">{player.id.slice(-12)}</p>
                     </div>
-                    {pid === currentLobby.host_id && (
+                    {player.id === currentLobby.host_id && (
                       <div className="flex items-center gap-1 text-xs text-yellow-400">
                         <Crown className="w-3.5 h-3.5" />
                         Host
                       </div>
                     )}
-                    {pid === playerId && (
+                    {player.id === playerId && (
                       <span className="text-xs text-brand-400 font-medium">You</span>
                     )}
                   </div>

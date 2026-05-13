@@ -6,9 +6,11 @@ import asyncio
 import json
 import os
 from typing import Dict, Set
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
+import httpx
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -22,6 +24,10 @@ from shared.events import Event, EventType, RedisEventStore
 
 
 app = FastAPI(title="Gateway Service", version="1.0.0")
+
+# Service URLs
+LEADERBOARD_SERVICE_URL = os.getenv("LEADERBOARD_SERVICE_URL", "http://leaderboard:3004")
+LOBBY_SERVICE_URL = os.getenv("LOBBY_SERVICE_URL", "http://lobby:3002")
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,6 +91,52 @@ manager = ConnectionManager()
 event_store: RedisEventStore = None
 
 
+# Proxy endpoints
+async def proxy_request(url: str, request: Request):
+    """Generic proxy for HTTP requests."""
+    async with httpx.AsyncClient() as client:
+        method = request.method
+        content = await request.body()
+        headers = dict(request.headers)
+        # Remove host header to avoid issues with target service
+        headers.pop("host", None)
+        
+        try:
+            response = await client.request(
+                method,
+                url,
+                content=content,
+                headers=headers,
+                params=request.query_params,
+                timeout=10.0
+            )
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers)
+            )
+        except Exception as e:
+            print(f"Proxy error: {e}")
+            raise HTTPException(status_code=502, detail="Service unreachable")
+
+
+@app.api_route("/leaderboard/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_leaderboard(path: str, request: Request):
+    print(f"DEBUG: Proxying leaderboard request: {path}")
+    return await proxy_request(f"{LEADERBOARD_SERVICE_URL}/leaderboard/{path}", request)
+
+
+@app.api_route("/lobbies/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_lobbies(path: str, request: Request):
+    print(f"DEBUG: Proxying lobbies request: {path}")
+    return await proxy_request(f"{LOBBY_SERVICE_URL}/lobbies/{path}", request)
+
+
+@app.api_route("/lobbies", methods=["GET"])
+async def proxy_lobbies_root(request: Request):
+    return await proxy_request(f"{LOBBY_SERVICE_URL}/lobbies", request)
+
+
 # HTTP endpoints
 @app.get("/health")
 async def health_check():
@@ -104,20 +156,37 @@ class LoginResponse(BaseModel):
 
 
 @app.post("/auth/login", response_model=LoginResponse)
-async def login(request: LoginRequest):
-    """Login endpoint - creates a new player session."""
-    # In real app, verify credentials against database
-    player_id = UUID(int=abs(hash(request.username)) % (2**32))
+async def login(request: Request, login_data: LoginRequest):
+    """Login endpoint - creates or retrieves a player session by unique username."""
+    username = login_data.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username cannot be empty")
+
+    # Check if username already has an ID assigned
+    username_key = f"username:{username.lower()}:id"
+    existing_id = await redis_client.redis.get(username_key)
+    
+    if existing_id:
+        player_id = UUID(existing_id)
+        # Verify if it matches exactly (optional, for case sensitivity handling)
+        stored_username_data = await redis_client.get_state(f"player:{player_id}:username")
+        stored_username = stored_username_data.get("username") if stored_username_data else username
+    else:
+        # Create new unique ID for this username
+        player_id = uuid4()
+        await redis_client.redis.set(username_key, str(player_id))
+        # Store metadata
+        await redis_client.set_state(f"player:{player_id}:username", {"username": username})
     
     token = create_access_token({
         "sub": str(player_id),
-        "username": request.username
+        "username": username
     })
     
     return LoginResponse(
         token=token,
         player_id=str(player_id),
-        username=request.username
+        username=username
     )
 
 

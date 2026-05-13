@@ -224,6 +224,13 @@ async def create_match(players: List[MatchRequest]) -> Match:
     )
     await event_store.append(f"match:{match_id}", event)
     
+    # Request lobby creation automatically
+    await redis_client.publish("lobby:create_from_match", {
+        "match_id": str(match_id),
+        "players": [str(p.player_id) for p in players],
+        "game_mode": players[0].game_mode.value
+    })
+    
     # Notify players via gateway
     for player in players:
         await redis_client.publish("gateway:match_found", {

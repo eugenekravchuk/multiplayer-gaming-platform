@@ -169,6 +169,17 @@ class LobbyManager:
         
         return len(lobby.players) >= 2  # Minimum 2 players
 
+    async def get_enriched_players(self, player_ids: list[UUID]) -> list[dict]:
+        """Get player IDs with usernames."""
+        enriched = []
+        for pid in player_ids:
+            username = "Unknown"
+            user_data = await redis_client.get_state(f"player:{pid}:username")
+            if user_data:
+                username = user_data.get("username", "Unknown")
+            enriched.append({"id": str(pid), "username": username})
+        return enriched
+
 
 lobby_manager = LobbyManager()
 event_store: RedisEventStore = None
@@ -208,7 +219,12 @@ async def get_lobby(lobby_id: str):
     if not lobby_data:
         raise HTTPException(status_code=404, detail="Lobby not found")
     
-    return lobby_data
+    lobby = Lobby(**lobby_data)
+    enriched_players = await lobby_manager.get_enriched_players(lobby.players)
+    
+    result = lobby.model_dump(mode="json")
+    result["players"] = enriched_players
+    return result
 
 
 async def handle_lobby_create(data: dict):
@@ -235,12 +251,16 @@ async def handle_lobby_create(data: dict):
     await event_store.append(f"lobby:{lobby.id}", event)
     
     # Notify host
+    enriched_players = await lobby_manager.get_enriched_players(lobby.players)
+    lobby_payload = lobby.model_dump(mode="json")
+    lobby_payload["players"] = enriched_players
+    
     await redis_client.publish("gateway:lobby_update", {
         "target_player_id": str(host_id),
         "event_type": "lobby.created",
         "payload": {
             "lobby_id": str(lobby.id),
-            "lobby": lobby.model_dump(mode="json")
+            "lobby": lobby_payload
         }
     })
 
@@ -264,6 +284,7 @@ async def handle_lobby_join(data: dict):
         await event_store.append(f"lobby:{lobby_id}", event)
         
         # Notify all players in lobby
+        enriched_players = await lobby_manager.get_enriched_players(lobby.players)
         for pid in lobby.players:
             await redis_client.publish("gateway:lobby_update", {
                 "target_player_id": str(pid),
@@ -271,7 +292,7 @@ async def handle_lobby_join(data: dict):
                 "payload": {
                     "lobby_id": lobby_id,
                     "player_id": str(player_id),
-                    "players": [str(p) for p in lobby.players]
+                    "players": enriched_players
                 }
             })
         
@@ -302,12 +323,24 @@ async def handle_lobby_leave(data: dict):
         )
         await event_store.append(f"lobby:{lobby_id}", event)
         
+        # Notify the player who left
+        await redis_client.publish("gateway:lobby_update", {
+            "target_player_id": str(player_id),
+            "event_type": "lobby.player_left",
+            "payload": {
+                "lobby_id": lobby_id,
+                "player_id": str(player_id),
+                "is_self": True
+            }
+        })
+        
         # Get updated lobby data
         lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
         
         # Notify remaining players
         if lobby_data:
             lobby = Lobby(**lobby_data)
+            enriched_players = await lobby_manager.get_enriched_players(lobby.players)
             for pid in lobby.players:
                 await redis_client.publish("gateway:lobby_update", {
                     "target_player_id": str(pid),
@@ -315,7 +348,7 @@ async def handle_lobby_leave(data: dict):
                     "payload": {
                         "lobby_id": lobby_id,
                         "player_id": str(player_id),
-                        "players": [str(p) for p in lobby.players]
+                        "players": enriched_players
                     }
                 })
 
@@ -332,6 +365,16 @@ async def handle_lobby_ready(data: dict):
     all_ready = await lobby_manager.is_lobby_ready(lobby_id)
     
     if all_ready:
+        # Prevent duplicate session creation by checking lobby status
+        lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
+        if lobby_data and lobby_data.get("is_ready"):
+            return # Already processing ready state
+            
+        # Set is_ready to True
+        if lobby_data:
+            lobby_data["is_ready"] = True
+            await redis_client.set_state(f"lobby:{lobby_id}", lobby_data, expire=3600)
+            
         # Emit lobby ready event
         event = Event(
             type=EventType.LOBBY_READY,
@@ -340,7 +383,6 @@ async def handle_lobby_ready(data: dict):
         await event_store.append(f"lobby:{lobby_id}", event)
         
         # Notify all players
-        lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
         if lobby_data:
             lobby = Lobby(**lobby_data)
             for pid in lobby.players:
@@ -353,16 +395,89 @@ async def handle_lobby_ready(data: dict):
                     }
                 })
         
-        # Trigger game session creation
-        await redis_client.publish("session:create_from_lobby", {
-            "lobby_id": lobby_id,
-            "players": [str(p) for p in lobby.players]
+            # Trigger game session creation
+            await redis_client.publish("session:create_from_lobby", {
+                "lobby_id": lobby_id,
+                "players": [str(p) for p in lobby.players],
+                "game_mode": lobby.game_mode.value
+            })
+
+
+async def handle_create_from_match(data: dict):
+    """Create a lobby automatically from a match."""
+    match_id = data["match_id"]
+    players = [UUID(p) for p in data["players"]]
+    game_mode = GameMode(data.get("game_mode", "casual"))
+    
+    if not players:
+        return
+        
+    host_id = players[0]
+    
+    # Create the lobby
+    lobby = await lobby_manager.create_lobby(
+        host_id=host_id,
+        name=f"Match {match_id[:8]}",
+        game_mode=game_mode,
+        max_players=len(players),
+        settings={"match_id": match_id}
+    )
+    
+    # Force add all other players to the lobby locally and in redis
+    for player_id in players[1:]:
+        lobby.players.append(player_id)
+        lobby_manager.player_lobbies[str(player_id)] = str(lobby.id)
+        await redis_client.set_state(
+            f"player:{player_id}:status",
+            {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": str(lobby.id)}
+        )
+        
+    # Save back to Redis
+    await redis_client.set_state(
+        f"lobby:{lobby.id}",
+        lobby.model_dump(mode="json"),
+        expire=3600
+    )
+    
+    # Emit event
+    event = Event(
+        type=EventType.LOBBY_CREATED,
+        payload={
+            "lobby_id": str(lobby.id),
+            "host_id": str(host_id),
+            "name": lobby.name,
+            "match_id": match_id
+        }
+    )
+    await event_store.append(f"lobby:{lobby.id}", event)
+    
+    # Notify all players in match
+    enriched_players = await lobby_manager.get_enriched_players(lobby.players)
+    lobby_payload = lobby.model_dump(mode="json")
+    lobby_payload["players"] = enriched_players
+    
+    for player_id in players:
+        await redis_client.publish("gateway:lobby_update", {
+            "target_player_id": str(player_id),
+            "event_type": "lobby.created",
+            "payload": {
+                "lobby_id": str(lobby.id),
+                "lobby": lobby_payload
+            }
         })
+
+async def handle_player_disconnected(player_id: str):
+    """Handle a player disconnect event."""
+    lobby_id = lobby_manager.player_lobbies.get(player_id)
+    if lobby_id:
+        await handle_lobby_leave({"player_id": player_id, "lobby_id": lobby_id})
 
 
 async def subscribe_to_requests():
     """Subscribe to lobby requests."""
-    pubsub = await redis_client.subscribe("lobby:create", "lobby:join", "lobby:leave", "lobby:ready")
+    pubsub = await redis_client.subscribe("lobby:create", "lobby:join", "lobby:leave", "lobby:ready", "lobby:create_from_match")
+    
+    # Also need pattern subscribe for disconnects, let's use a separate task for streams
     
     async for message in pubsub.listen():
         if message["type"] == "message":
@@ -378,9 +493,26 @@ async def subscribe_to_requests():
                     await handle_lobby_leave(data)
                 elif channel == "lobby:ready":
                     await handle_lobby_ready(data)
+                elif channel == "lobby:create_from_match":
+                    await handle_create_from_match(data)
                     
             except Exception as e:
                 print(f"Error processing lobby request: {e}")
+
+async def subscribe_to_disconnects():
+    """Subscribe to player disconnect events."""
+    pubsub = redis_client.redis.pubsub()
+    await pubsub.psubscribe("stream:player:*")
+    async for message in pubsub.listen():
+        if message["type"] == "pmessage":
+            try:
+                data = json.loads(message["data"])
+                if data.get("type") == EventType.PLAYER_DISCONNECTED.value:
+                    player_id = data.get("payload", {}).get("player_id")
+                    if player_id:
+                        await handle_player_disconnected(player_id)
+            except Exception as e:
+                print(f"Error processing disconnect: {e}")
 
 
 @app.on_event("startup")
@@ -392,6 +524,7 @@ async def startup():
     
     # Start background tasks
     asyncio.create_task(subscribe_to_requests())
+    asyncio.create_task(subscribe_to_disconnects())
     
     # Register service
     await redis_client.register_service(

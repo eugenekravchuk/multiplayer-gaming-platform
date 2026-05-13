@@ -40,6 +40,9 @@ class LeaderboardManager:
         """Update player score on leaderboard."""
         key = self.leaderboards.get(category, "leaderboard:global")
         
+        # Save username globally
+        await redis_client.set_state(f"player:{player_id}:username", {"username": username})
+        
         # Add to sorted set (score as value, player_id as member)
         await redis_client.redis.zadd(key, {str(player_id): score})
         
@@ -81,23 +84,29 @@ class LeaderboardManager:
             # Get player stats
             stats = await redis_client.get_state(f"player_stats:{player_id}:{category}")
             
-            if stats:
-                entry = LeaderboardEntry(
-                    player_id=UUID(player_id),
-                    username=stats.get("username", "Unknown"),
-                    score=int(score),
-                    wins=stats.get("wins", 0),
-                    losses=stats.get("losses", 0),
-                    rank=rank
-                )
-            else:
-                entry = LeaderboardEntry(
-                    player_id=UUID(player_id),
-                    username="Unknown",
-                    score=int(score),
-                    rank=rank
-                )
+            username = "Unknown"
+            wins = 0
+            losses = 0
             
+            if stats:
+                username = stats.get("username", "Unknown")
+                wins = stats.get("wins", 0)
+                losses = stats.get("losses", 0)
+            
+            # Fallback to global username if unknown
+            if username == "Unknown":
+                user_data = await redis_client.get_state(f"player:{player_id}:username")
+                if user_data:
+                    username = user_data.get("username", "Unknown")
+            
+            entry = LeaderboardEntry(
+                player_id=UUID(player_id),
+                username=username,
+                score=int(score),
+                wins=wins,
+                losses=losses,
+                rank=rank
+            )
             entries.append(entry)
         
         return entries
@@ -118,12 +127,27 @@ class LeaderboardManager:
         # Get detailed stats
         stats = await redis_client.get_state(f"player_stats:{player_id}:{category}")
         
+        username = "Unknown"
+        wins = 0
+        losses = 0
+        
+        if stats:
+            username = stats.get("username", "Unknown")
+            wins = stats.get("wins", 0)
+            losses = stats.get("losses", 0)
+            
+        # Fallback to global username if unknown
+        if username == "Unknown":
+            user_data = await redis_client.get_state(f"player:{player_id}:username")
+            if user_data:
+                username = user_data.get("username", "Unknown")
+        
         return LeaderboardEntry(
             player_id=player_id,
-            username=stats.get("username", "Unknown") if stats else "Unknown",
+            username=username,
             score=int(score),
-            wins=stats.get("wins", 0) if stats else 0,
-            losses=stats.get("losses", 0) if stats else 0,
+            wins=wins,
+            losses=losses,
             rank=rank
         )
     
@@ -170,6 +194,12 @@ class LeaderboardManager:
         # Increment in sorted set
         new_score = await redis_client.redis.zincrby(key, points, str(player_id))
         
+        # Try to get username if not provided
+        if not username or username == "Unknown":
+            user_data = await redis_client.get_state(f"player:{player_id}:username")
+            if user_data:
+                username = user_data.get("username", "Unknown")
+
         # Update stats
         stats_key = f"player_stats:{player_id}:{category}"
         stats = await redis_client.get_state(stats_key) or {}
@@ -260,54 +290,73 @@ async def get_nearby(category: str, player_id: str, range_count: int = 5):
 # Event handlers
 async def handle_score_update(data: dict):
     """Handle score update event."""
+    print(f"DEBUG: Received score update: {data}")
     player_id = UUID(data["player_id"])
-    username = data.get("username", "Unknown")
-    score = data.get("score", 0)
+    rating_change = data.get("rating_change", 0)
     category = data.get("category", "global")
+    won = data.get("win", False)
     
-    await leaderboard_manager.update_score(
-        player_id, username, score, 
-        data.get("wins", 0), data.get("losses", 0), 
-        category
+    # Get current username if possible
+    stats = await redis_client.get_state(f"player_stats:{player_id}:{category}")
+    username = stats.get("username", "Unknown") if stats else "Unknown"
+    
+    # Update wins/losses
+    wins = (stats.get("wins", 0) if stats else 0) + (1 if won else 0)
+    losses = (stats.get("losses", 0) if stats else 0) + (0 if won else 1)
+    
+    # Increment score for specific category
+    new_score = await leaderboard_manager.increment_score(
+        player_id, username, rating_change, category
     )
+    
+    # Also update global leaderboard
+    if category != "global":
+        await leaderboard_manager.increment_score(
+            player_id, username, rating_change, "global"
+        )
+    
+    # Update detailed stats (wins/losses)
+    for cat in set([category, "global"]):
+        stats_key = f"player_stats:{player_id}:{cat}"
+        updated_stats = await redis_client.get_state(stats_key) or {}
+        
+        # Recalculate wins/losses for global might be tricky if we don't have total history,
+        # but for now we can just increment them too.
+        cat_wins = (updated_stats.get("wins", 0)) + (1 if won else 0)
+        cat_losses = (updated_stats.get("losses", 0)) + (0 if won else 1)
+        
+        updated_stats.update({
+            "player_id": str(player_id),
+            "username": username,
+            "wins": cat_wins,
+            "losses": cat_losses,
+            "updated_at": datetime.utcnow().isoformat()
+        })
+        await redis_client.set_state(stats_key, updated_stats)
     
     # Emit event
     event = Event(
         type=EventType.SCORE_UPDATED,
         payload={
             "player_id": str(player_id),
-            "score": score,
+            "score": new_score,
+            "rating_change": rating_change,
             "category": category
         }
     )
     await event_store.append(f"leaderboard:{player_id}", event)
     
-    # Check for rank change
-    new_rank = await leaderboard_manager.get_rank(player_id, category)
-    old_rank = data.get("old_rank")
-    
-    if old_rank and new_rank != old_rank:
-        event = Event(
-            type=EventType.RANKING_CHANGED,
-            payload={
-                "player_id": str(player_id),
-                "old_rank": old_rank,
-                "new_rank": new_rank,
-                "category": category
-            }
-        )
-        await event_store.append(f"leaderboard:{player_id}", event)
-        
-        # Notify player
-        await redis_client.publish("gateway:notification", {
-            "target_player_id": str(player_id),
-            "event_type": "ranking.changed",
-            "payload": {
-                "old_rank": old_rank,
-                "new_rank": new_rank,
-                "category": category
-            }
-        })
+    # Notify player via gateway
+    await redis_client.publish("gateway:notification", {
+        "target_player_id": str(player_id),
+        "event_type": "score.updated",
+        "payload": {
+            "new_score": new_score,
+            "rating_change": rating_change,
+            "wins": wins,
+            "losses": losses
+        }
+    })
 
 
 async def handle_session_ended(data: dict):
@@ -339,9 +388,33 @@ async def handle_session_ended(data: dict):
         })
 
 
+async def handle_player_connected(data: dict):
+    """Handle player connected event - capture username."""
+    player_id = UUID(data["player_id"])
+    username = data.get("username")
+    if username:
+        await redis_client.set_state(f"player:{player_id}:username", {"username": username})
+
+
 async def subscribe_to_events():
     """Subscribe to score update events."""
     pubsub = await redis_client.subscribe("leaderboard:update", "session:ended")
+    
+    # Pattern subscribe to capture player connected events from Gateway
+    p_pubsub = redis_client.redis.pubsub()
+    await p_pubsub.psubscribe("stream:player:*")
+    
+    async def listen_to_patterns():
+        async for message in p_pubsub.listen():
+            if message["type"] == "pmessage":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("type") == EventType.PLAYER_CONNECTED.value:
+                        await handle_player_connected(data.get("payload", {}))
+                except Exception as e:
+                    print(f"Error processing pattern event: {e}")
+
+    asyncio.create_task(listen_to_patterns())
     
     async for message in pubsub.listen():
         if message["type"] == "message":

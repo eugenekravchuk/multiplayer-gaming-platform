@@ -73,6 +73,7 @@ class GameSession(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     match_id: UUID
     players: List[UUID]
+    game_mode: GameMode = GameMode.CASUAL
     state: GameState
     status: str = "active"  # active, paused, ended
     created_at: datetime = Field(default_factory=datetime.utcnow)

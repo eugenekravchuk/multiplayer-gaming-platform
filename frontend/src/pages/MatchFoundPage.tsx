@@ -1,26 +1,15 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Swords, Users } from 'lucide-react'
+import { Swords, Users, Loader2 } from 'lucide-react'
 import { useGameStore } from '../store/gameStore'
-import { useWebSocket } from '../hooks/useWebSocket'
 
 export default function MatchFoundPage() {
-  const { currentMatch, setCurrentLobby } = useGameStore()
-  const { send } = useWebSocket()
+  const { currentMatch } = useGameStore()
   const navigate = useNavigate()
 
   useEffect(() => {
     if (!currentMatch) navigate('/')
   }, [currentMatch, navigate])
-
-  const createLobbyFromMatch = () => {
-    // Create a lobby for matched players
-    send('lobby.create', {
-      name: `Match ${currentMatch?.match_id.slice(0, 8)}`,
-      game_mode: currentMatch?.game_mode,
-      max_players: currentMatch?.players.length ?? 2,
-    })
-  }
 
   if (!currentMatch) return null
 
@@ -53,19 +42,12 @@ export default function MatchFoundPage() {
           </div>
         </div>
 
-        <div className="flex gap-3">
-          <button
-            onClick={createLobbyFromMatch}
-            className="flex-1 py-3 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold transition-all glow"
-          >
-            Create Lobby
-          </button>
-          <button
-            onClick={() => navigate('/')}
-            className="flex-1 py-3 rounded-xl bg-surface-700 hover:bg-surface-600 text-slate-300 font-semibold transition-all"
-          >
-            Back to Menu
-          </button>
+        <div className="pt-4 flex flex-col items-center gap-3">
+          <div className="flex items-center gap-2 text-brand-400 font-medium">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            Creating lobby...
+          </div>
+          <p className="text-xs text-slate-500">You will be redirected automatically</p>
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Lobby, Match, GameSession, ChatMessage, Notification, LeaderboardEntry } from '../types'
+import type { Lobby, Match, GameSession, ChatMessage, Notification, LeaderboardEntry, LobbyPlayer } from '../types'
 
 interface GameState {
   // Matchmaking
@@ -28,13 +28,13 @@ interface GameState {
   setMatchmakingStatus: (status: 'idle' | 'searching' | 'found') => void
   setCurrentMatch: (match: Match | null) => void
   setCurrentLobby: (lobby: Lobby | null) => void
-  updateLobbyPlayers: (players: string[]) => void
+  updateLobbyPlayers: (players: LobbyPlayer[]) => void
   setLobbies: (lobbies: Lobby[]) => void
   setCurrentSession: (session: GameSession | null) => void
   updateSessionState: (state: GameSession['state']) => void
   addMessage: (channelId: string, message: ChatMessage) => void
   setMessages: (channelId: string, messages: ChatMessage[]) => void
-  setActiveChannel: (channel: string) => void
+  setActiveChannel: (channel) => void
   addNotification: (notification: Notification) => void
   setUnreadCount: (count: number) => void
   markNotificationsRead: () => void
