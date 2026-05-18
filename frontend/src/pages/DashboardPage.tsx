@@ -1,12 +1,31 @@
 import { useNavigate } from 'react-router-dom'
+import { useState, useEffect } from 'react'
 import { Swords, Users, Trophy, Zap, Activity } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { useGameStore } from '../store/gameStore'
 
+const API = 'http://localhost:3000'
+
+interface PlayerStats {
+  wins: number
+  losses: number
+  score: number
+  rank: number | null
+}
+
 export default function DashboardPage() {
-  const { username } = useAuthStore()
+  const { username, playerId } = useAuthStore()
   const { currentSession, currentLobby, matchmakingStatus } = useGameStore()
   const navigate = useNavigate()
+  const [stats, setStats] = useState<PlayerStats | null>(null)
+
+  useEffect(() => {
+    if (!playerId) return
+    fetch(`${API}/leaderboard/global/player/${playerId}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => d && setStats({ wins: d.wins ?? 0, losses: d.losses ?? 0, score: d.score ?? 0, rank: d.rank ?? null }))
+      .catch(() => {})
+  }, [playerId])
 
   const quickActions = [
     {
@@ -95,10 +114,10 @@ export default function DashboardPage() {
       {/* Stats strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Games Played', value: '—' },
-          { label: 'Wins', value: '—' },
-          { label: 'Win Rate', value: '—' },
-          { label: 'Rank', value: '—' },
+          { label: 'Games Played', value: stats ? stats.wins + stats.losses : '—' },
+          { label: 'Wins', value: stats ? stats.wins : '—' },
+          { label: 'Win Rate', value: stats && (stats.wins + stats.losses) > 0 ? `${Math.round(stats.wins / (stats.wins + stats.losses) * 100)}%` : '—' },
+          { label: 'Rating', value: stats ? stats.score : '—' },
         ].map(({ label, value }) => (
           <div key={label} className="glass rounded-xl p-4 text-center">
             <p className="text-2xl font-bold text-white">{value}</p>
