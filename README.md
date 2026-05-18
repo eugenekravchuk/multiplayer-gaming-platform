@@ -41,9 +41,6 @@ graph TB
     CH <-->|"Pub/Sub + Lists/Sets"| REDIS
     NT <-->|"Pub/Sub + Lists"| REDIS
 ```
-
-> **Note on the data layer:** The current deployment uses a **single Redis node** with AOF (Append-Only File) persistence (`--appendonly yes`). There is **no Redis replication, Sentinel, or Cluster** configured. Redis is the single source of truth for all distributed state; if Redis restarts, state is recovered from the AOF log.
-
 ---
 
 ### Service-to-Service Communication (Redis Pub/Sub Channels)
