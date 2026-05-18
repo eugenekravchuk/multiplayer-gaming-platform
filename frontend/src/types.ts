@@ -41,6 +41,7 @@ export interface ChatMessage {
   id: string
   channel_id: string
   sender_id: string
+  sender_username?: string | null
   content: string
   timestamp: string
   metadata?: Record<string, unknown> | null

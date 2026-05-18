@@ -84,6 +84,7 @@ class ChatMessage(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     channel_id: str
     sender_id: UUID
+    sender_username: Optional[str] = None
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     metadata: Optional[Dict[str, Any]] = None

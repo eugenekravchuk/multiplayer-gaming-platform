@@ -62,12 +62,14 @@ class ChatManager:
         
         return True
     
-    async def send_message(self, channel_id: str, sender_id: UUID, 
-                          content: str, metadata: dict = None) -> ChatMessage:
+    async def send_message(self, channel_id: str, sender_id: UUID,
+                          content: str, sender_username: str = None,
+                          metadata: dict = None) -> ChatMessage:
         """Send message to channel."""
         message = ChatMessage(
             channel_id=channel_id,
             sender_id=sender_id,
+            sender_username=sender_username,
             content=content,
             metadata=metadata
         )
@@ -216,9 +218,14 @@ async def handle_chat_message(data: dict):
         # Auto-join if not in channel (for global/lobby channels)
         await chat_manager.join_channel(channel_id, sender_id)
     
+    # Look up sender username
+    username_data = await redis_client.get_state(f"player:{sender_id}:username")
+    sender_username = username_data.get("username") if username_data else str(sender_id)
+
     # Create and store message
     message = await chat_manager.send_message(
-        channel_id, sender_id, content, 
+        channel_id, sender_id, content,
+        sender_username=sender_username,
         metadata=data.get("metadata")
     )
     

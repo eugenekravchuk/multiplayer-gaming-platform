@@ -42,7 +42,7 @@ export default function ChatPanel() {
         {channelMessages.map((msg) => (
           <div key={msg.id} className={`flex flex-col ${msg.sender_id === playerId ? 'items-end' : 'items-start'}`}>
             <span className="text-xs text-slate-500 mb-0.5 px-1">
-              {msg.sender_id === playerId ? 'You' : msg.sender_id.slice(-6)}
+              {msg.sender_id === playerId ? 'You' : (msg.sender_username ?? msg.sender_id.slice(-6))}
               {' · '}{formatTime(msg.timestamp)}
             </span>
             <div
