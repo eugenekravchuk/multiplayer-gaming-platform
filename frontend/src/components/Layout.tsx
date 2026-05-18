@@ -1,5 +1,5 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { Gamepad2, Swords, Users, Trophy, LogOut, Bell } from 'lucide-react'
+import { Outlet, NavLink } from 'react-router-dom'
+import { Gamepad2, Swords, Users, Trophy, Bell } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { useGameStore } from '../store/gameStore'
 import { useWebSocket } from '../hooks/useWebSocket'
@@ -9,16 +9,11 @@ import { useState } from 'react'
 
 export default function Layout() {
   useWebSocket()
-  const { username, clearAuth } = useAuthStore()
+  const { username } = useAuthStore()
   const { unreadCount } = useGameStore()
-  const navigate = useNavigate()
   const [showNotifications, setShowNotifications] = useState(false)
   const [showChat, setShowChat] = useState(false)
 
-  const logout = () => {
-    clearAuth()
-    navigate('/login')
-  }
 
   const navItems = [
     { to: '/', icon: Gamepad2, label: 'Dashboard', exact: true },
@@ -85,13 +80,6 @@ export default function Layout() {
                 {username?.[0]?.toUpperCase()}
               </div>
               <span className="text-sm text-slate-300 font-medium">{username}</span>
-              <button
-                onClick={logout}
-                className="p-1.5 rounded text-slate-500 hover:text-red-400 transition-colors"
-                title="Logout"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
             </div>
           </div>
         </div>
