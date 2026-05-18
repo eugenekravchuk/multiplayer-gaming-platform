@@ -75,6 +75,8 @@ export function useWebSocket() {
         break
 
       case 'session.started':
+        setCurrentLobby(null)
+        setMatchmakingStatus('idle')
         setCurrentSession({
           id: msg.data.session_id,
           match_id: '',

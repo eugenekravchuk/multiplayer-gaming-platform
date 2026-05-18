@@ -33,7 +33,7 @@ export default function LobbyPage() {
 
   const createLobby = () => {
     if (!lobbyName.trim()) return
-    send('lobby.create', { name: lobbyName.trim(), game_mode: 'casual', max_players: 8 })
+    send('lobby.create', { name: lobbyName.trim(), game_mode: 'casual', max_players: 2 })
     setLobbyName('')
   }
 

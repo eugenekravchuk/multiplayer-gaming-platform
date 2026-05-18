@@ -5,7 +5,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { useAuthStore } from '../store/authStore'
 
 export default function GamePage() {
-  const { currentSession } = useGameStore()
+  const { currentSession, setCurrentSession } = useGameStore()
   const { send } = useWebSocket()
   const { playerId } = useAuthStore()
   const navigate = useNavigate()
@@ -79,7 +79,7 @@ export default function GamePage() {
             <h2 className={`text-4xl font-black ${winColor}`}>{winMsg}</h2>
             {gameData.finish_reason === 'disconnect' && <p className="text-slate-400">Opponent disconnected.</p>}
             <button
-              onClick={() => navigate('/')}
+              onClick={() => { setCurrentSession(null); navigate('/') }}
               className="mt-4 px-6 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium"
             >
               Back to Dashboard
@@ -114,7 +114,7 @@ export default function GamePage() {
       {status !== 'game_finished' && (
         <div className="text-center">
           <button
-            onClick={() => navigate('/')}
+            onClick={() => { setCurrentSession(null); navigate('/') }}
             className="px-4 py-2 rounded-lg bg-surface-700 hover:bg-surface-600 text-slate-400 text-sm transition-all"
           >
             Leave Match

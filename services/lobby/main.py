@@ -425,6 +425,12 @@ async def handle_lobby_ready(data: dict):
                     "game_mode": lobby.game_mode.value
                 })
 
+                # Delete lobby immediately after session is triggered
+                await redis_client.delete_state(f"lobby:{lobby_id}")
+                for pid in lobby.players:
+                    await redis_client.redis.delete(f"player:{pid}:lobby_id")
+                    await redis_client.delete_state(f"lobby:{lobby_id}:ready:{pid}")
+
 
 async def handle_create_from_match(data: dict):
     """Create a lobby automatically from a match."""
