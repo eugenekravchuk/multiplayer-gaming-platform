@@ -13,6 +13,8 @@ export function useWebSocket() {
   const { token } = useAuthStore()
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const { clearAuth } = useAuthStore()
+
   const {
     setMatchmakingStatus,
     setCurrentMatch,
@@ -129,9 +131,13 @@ export function useWebSocket() {
         }
       }
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         socket = null
-        // Reconnect after 3s
+        if (event.code === 4001) {
+          clearAuth()
+          navigate('/login')
+          return
+        }
         reconnectTimeout.current = setTimeout(connect, 3000)
       }
 
@@ -146,7 +152,7 @@ export function useWebSocket() {
     return () => {
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current)
     }
-  }, [token, handleMessage])
+  }, [token, handleMessage, clearAuth])
 
   return { send, connected: socket?.readyState === WebSocket.OPEN }
 }

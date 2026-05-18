@@ -200,7 +200,7 @@ async def list_lobbies():
     result = []
     # Note: Scanning all lobbies is not ideal for scaling, but good enough for now
     async for key in redis_client.redis.scan_iter(match="lobby:*"):
-        key_str = key.decode()
+        key_str = key
         if ":ready:" not in key_str:
             lobby_data = await redis_client.get_state(key_str)
             if lobby_data and isinstance(lobby_data, dict):
@@ -287,18 +287,32 @@ async def handle_lobby_join(data: dict):
         )
         await event_store.append(f"lobby:{lobby_id}", event)
         
-        # Notify all players in lobby
         enriched_players = await lobby_manager.get_enriched_players(lobby.players)
+        lobby_payload = lobby.model_dump(mode="json")
+        lobby_payload["players"] = enriched_players
+
+        # Send the joining player a full lobby snapshot so they enter the lobby view
+        await redis_client.publish("gateway:lobby_update", {
+            "target_player_id": str(player_id),
+            "event_type": "lobby.created",
+            "payload": {
+                "lobby_id": lobby_id,
+                "lobby": lobby_payload
+            }
+        })
+
+        # Notify existing players about the new arrival
         for pid in lobby.players:
-            await redis_client.publish("gateway:lobby_update", {
-                "target_player_id": str(pid),
-                "event_type": "lobby.player_joined",
-                "payload": {
-                    "lobby_id": lobby_id,
-                    "player_id": str(player_id),
-                    "players": enriched_players
-                }
-            })
+            if pid != player_id:
+                await redis_client.publish("gateway:lobby_update", {
+                    "target_player_id": str(pid),
+                    "event_type": "lobby.player_joined",
+                    "payload": {
+                        "lobby_id": lobby_id,
+                        "player_id": str(player_id),
+                        "players": enriched_players
+                    }
+                })
         
     except HTTPException as e:
         # Notify player of error
@@ -480,7 +494,7 @@ async def handle_player_disconnected(player_id: str):
     """Handle a player disconnect event."""
     lobby_id_bytes = await redis_client.redis.get(f"player:{player_id}:lobby_id")
     if lobby_id_bytes:
-        lobby_id = lobby_id_bytes.decode()
+        lobby_id = lobby_id_bytes
         await handle_lobby_leave({"player_id": player_id, "lobby_id": lobby_id})
 
 

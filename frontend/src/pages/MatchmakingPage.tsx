@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Swords, Loader2, X, Zap } from 'lucide-react'
+import { Swords, Loader2, X, Zap, Check } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useGameStore } from '../store/gameStore'
 
@@ -22,8 +22,8 @@ export default function MatchmakingPage() {
   }
 
   const modes = [
-    { id: 'casual' as Mode, label: 'Casual', desc: 'Relaxed gameplay, no rank at stake', color: 'border-emerald-500/50 bg-emerald-500/10' },
-    { id: 'ranked' as Mode, label: 'Ranked', desc: 'Compete for rating and leaderboard position', color: 'border-brand-500/50 bg-brand-500/10' },
+    { id: 'casual' as Mode, label: 'Casual', desc: 'Relaxed gameplay, no rank at stake', color: 'border-emerald-500 bg-emerald-500/20 shadow-lg shadow-emerald-500/10', check: 'bg-emerald-500' },
+    { id: 'ranked' as Mode, label: 'Ranked', desc: 'Compete for rating and leaderboard position', color: 'border-brand-500 bg-brand-500/20 shadow-lg shadow-brand-500/10', check: 'bg-brand-500' },
   ]
 
   return (
@@ -44,8 +44,17 @@ export default function MatchmakingPage() {
               selectedMode === mode.id ? mode.color : 'border-transparent hover:border-surface-600'
             } ${searching ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
           >
-            <div className="font-semibold text-white">{mode.label}</div>
-            <div className="text-sm text-slate-400 mt-0.5">{mode.desc}</div>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-semibold text-white">{mode.label}</div>
+                <div className="text-sm text-slate-400 mt-0.5">{mode.desc}</div>
+              </div>
+              {selectedMode === mode.id && (
+                <div className={`w-5 h-5 rounded-full ${mode.check} flex items-center justify-center flex-shrink-0`}>
+                  <Check className="w-3 h-3 text-white" />
+                </div>
+              )}
+            </div>
           </button>
         ))}
       </div>
