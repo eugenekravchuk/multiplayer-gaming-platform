@@ -1,8 +1,12 @@
 """Redis client utilities."""
 import json
-import redis.asyncio as redis
-from typing import Optional, Any
 import os
+import asyncio
+from typing import Optional, Any, List
+from datetime import datetime
+from uuid import UUID, uuid4
+from contextlib import asynccontextmanager
+import redis.asyncio as redis
 
 
 class RedisClient:
@@ -18,10 +22,14 @@ class RedisClient:
     async def connect(self, url: str = None):
         """Connect to Redis."""
         if url is None:
-            url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            url = os.getenv("REDIS_URL", "redis://redis:6379")
         
         if self._redis is None:
+            print(f"Connecting to Redis at {url}...")
             self._redis = await redis.from_url(url, decode_responses=True)
+            # Verify connection
+            await self._redis.ping()
+            print("Connected to Redis successfully")
         return self._redis
     
     async def disconnect(self):
@@ -70,32 +78,60 @@ class RedisClient:
     async def delete_state(self, key: str) -> None:
         """Delete distributed state."""
         await self.redis.delete(key)
+        
+    # Task Queue helpers (for scalable worker distribution)
+    async def enqueue_task(self, queue_name: str, task: Any) -> None:
+        """Push a task to a Redis list queue."""
+        if isinstance(task, (dict, list)):
+            task = json.dumps(task)
+        await self.redis.lpush(queue_name, task)
+        
+    async def dequeue_task(self, queue_name: str, timeout: int = 0) -> Optional[dict]:
+        """Pop a task from a Redis list queue (blocks for `timeout` seconds)."""
+        result = await self.redis.brpop(queue_name, timeout=timeout)
+        if result:
+            _, task_data = result
+            try:
+                return json.loads(task_data)
+            except json.JSONDecodeError:
+                return task_data
+        return None
+
+    @asynccontextmanager
+    async def lock(self, lock_name: str, timeout: int = 10, wait: bool = True):
+        """Distributed lock using Redis SETNX."""
+        lock_key = f"lock:{lock_name}"
+        lock_id = str(uuid4())
+        acquired = False
+        try:
+            while not acquired:
+                acquired = await self.redis.set(lock_key, lock_id, nx=True, ex=timeout)
+                if not acquired:
+                    if not wait:
+                        break
+                    await asyncio.sleep(0.1)
+            yield acquired
+        finally:
+            if acquired:
+                script = """
+                if redis.call("get", KEYS[1]) == ARGV[1] then
+                    return redis.call("del", KEYS[1])
+                else
+                    return 0
+                end
+                """
+                await self.redis.eval(script, 1, lock_key, lock_id)
     
-    # Service discovery helpers
     async def register_service(self, service_name: str, instance_id: str, 
                                host: str, port: int, ttl: int = 30) -> None:
         """Register service instance for service discovery."""
         key = f"services:{service_name}:{instance_id}"
-        value = json.dumps({"host": host, "port": port, "registered_at": datetime.utcnow().isoformat()})
+        value = json.dumps({
+            "host": host, 
+            "port": port, 
+            "registered_at": datetime.utcnow().isoformat()
+        })
         await self.redis.setex(key, ttl, value)
-    
-    async def discover_service(self, service_name: str) -> Optional[dict]:
-        """Discover a service instance (round-robin)."""
-        pattern = f"services:{service_name}:*"
-        keys = []
-        async for key in self.redis.scan_iter(match=pattern):
-            keys.append(key)
-        
-        if not keys:
-            return None
-        
-        # Simple round-robin: pick first available
-        key = keys[0]
-        value = await self.redis.get(key)
-        return json.loads(value) if value else None
-
-
-from datetime import datetime
 
 
 # Global Redis client instance

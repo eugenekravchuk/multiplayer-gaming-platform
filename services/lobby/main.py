@@ -25,10 +25,6 @@ app = FastAPI(title="Lobby Service", version="1.0.0")
 class LobbyManager:
     """Manages active lobbies in distributed state."""
     
-    def __init__(self):
-        self.lobbies: Dict[str, Lobby] = {}  # local cache
-        self.player_lobbies: Dict[str, str] = {}  # player_id -> lobby_id
-    
     async def create_lobby(self, host_id: UUID, name: str, game_mode: GameMode, 
                            max_players: int = 8, settings: dict = None) -> Lobby:
         """Create a new lobby."""
@@ -51,105 +47,109 @@ class LobbyManager:
             expire=3600
         )
         
-        self.lobbies[str(lobby_id)] = lobby
-        self.player_lobbies[str(host_id)] = str(lobby_id)
-        
         # Update player status
         await redis_client.set_state(
             f"player:{host_id}:status",
-            {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": str(lobby_id)}
+            {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": str(lobby_id)},
+            expire=300
         )
+        await redis_client.redis.set(f"player:{host_id}:lobby_id", str(lobby_id))
         
         return lobby
     
     async def join_lobby(self, lobby_id: str, player_id: UUID) -> Optional[Lobby]:
         """Add player to lobby."""
-        # Get lobby from Redis
-        lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
-        if not lobby_data:
-            raise HTTPException(status_code=404, detail="Lobby not found")
-        
-        lobby = Lobby(**lobby_data)
-        
-        # Check if lobby is full
-        if len(lobby.players) >= lobby.max_players:
-            raise HTTPException(status_code=400, detail="Lobby is full")
-        
-        # Check if already in lobby
-        if player_id in lobby.players:
+        async with redis_client.lock(f"lobby_lock:{lobby_id}", timeout=5) as acquired:
+            if not acquired:
+                raise HTTPException(status_code=503, detail="Lobby is busy, try again")
+                
+            # Get lobby from Redis
+            lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
+            if not lobby_data:
+                raise HTTPException(status_code=404, detail="Lobby not found")
+            
+            lobby = Lobby(**lobby_data)
+            
+            # Check if lobby is full
+            if len(lobby.players) >= lobby.max_players:
+                raise HTTPException(status_code=400, detail="Lobby is full")
+            
+            # Check if already in lobby
+            if player_id in lobby.players:
+                return lobby
+            
+            # Add player
+            lobby.players.append(player_id)
+            
+            # Save back to Redis
+            await redis_client.set_state(
+                f"lobby:{lobby_id}",
+                lobby.model_dump(mode="json"),
+                expire=3600
+            )
+            
+            # Update player status
+            await redis_client.set_state(
+                f"player:{player_id}:status",
+                {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": lobby_id},
+                expire=300
+            )
+            await redis_client.redis.set(f"player:{player_id}:lobby_id", str(lobby_id))
+            
             return lobby
-        
-        # Add player
-        lobby.players.append(player_id)
-        
-        # Save back to Redis
-        await redis_client.set_state(
-            f"lobby:{lobby_id}",
-            lobby.model_dump(mode="json"),
-            expire=3600
-        )
-        
-        self.lobbies[lobby_id] = lobby
-        self.player_lobbies[str(player_id)] = lobby_id
-        
-        # Update player status
-        await redis_client.set_state(
-            f"player:{player_id}:status",
-            {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": lobby_id}
-        )
-        
-        return lobby
     
     async def leave_lobby(self, lobby_id: str, player_id: UUID) -> bool:
         """Remove player from lobby."""
-        lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
-        if not lobby_data:
-            return False
-        
-        lobby = Lobby(**lobby_data)
-        
-        if player_id not in lobby.players:
-            return False
-        
-        # Remove player
-        lobby.players.remove(player_id)
-        
-        # If host leaves, assign new host or delete lobby
-        if lobby.host_id == player_id:
-            if lobby.players:
-                lobby.host_id = lobby.players[0]
-            else:
-                # Delete empty lobby
-                await redis_client.delete_state(f"lobby:{lobby_id}")
-                if lobby_id in self.lobbies:
-                    del self.lobbies[lobby_id]
-                return True
-        
-        # Save back to Redis
-        await redis_client.set_state(
-            f"lobby:{lobby_id}",
-            lobby.model_dump(mode="json"),
-            expire=3600
-        )
-        
-        self.lobbies[lobby_id] = lobby
-        if str(player_id) in self.player_lobbies:
-            del self.player_lobbies[str(player_id)]
-        
-        # Update player status
-        await redis_client.set_state(
-            f"player:{player_id}:status",
-            {"status": PlayerStatus.ONLINE.value}
-        )
-        
-        return True
+        async with redis_client.lock(f"lobby_lock:{lobby_id}", timeout=5) as acquired:
+            if not acquired:
+                return False
+                
+            lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
+            if not lobby_data:
+                return False
+            
+            lobby = Lobby(**lobby_data)
+            
+            if player_id not in lobby.players:
+                return False
+            
+            # Remove player
+            lobby.players.remove(player_id)
+            
+            # If host leaves, assign new host or delete lobby
+            if lobby.host_id == player_id:
+                if lobby.players:
+                    lobby.host_id = lobby.players[0]
+                else:
+                    # Delete empty lobby
+                    await redis_client.delete_state(f"lobby:{lobby_id}")
+                    await redis_client.redis.delete(f"player:{player_id}:lobby_id")
+                    return True
+            
+            # Save back to Redis
+            await redis_client.set_state(
+                f"lobby:{lobby_id}",
+                lobby.model_dump(mode="json"),
+                expire=3600
+            )
+            
+            # Update player status
+            await redis_client.set_state(
+                f"player:{player_id}:status",
+                {"status": PlayerStatus.ONLINE.value},
+                expire=300
+            )
+            await redis_client.redis.delete(f"player:{player_id}:lobby_id")
+            
+            return True
     
     async def set_ready(self, lobby_id: str, player_id: UUID, ready: bool) -> bool:
         """Set player ready status."""
         # Store ready state
         await redis_client.set_state(
             f"lobby:{lobby_id}:ready:{player_id}",
-            {"ready": ready, "timestamp": datetime.utcnow().isoformat()}
+            {"ready": ready, "timestamp": datetime.utcnow().isoformat()},
+            expire=3600
         )
         return True
     
@@ -190,8 +190,7 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "service": "lobby",
-        "active_lobbies": len(lobby_manager.lobbies)
+        "service": "lobby"
     }
 
 
@@ -199,16 +198,21 @@ async def health_check():
 async def list_lobbies():
     """List all active lobbies."""
     result = []
-    for lobby_id, lobby in lobby_manager.lobbies.items():
-        result.append({
-            "id": lobby_id,
-            "name": lobby.name,
-            "host_id": str(lobby.host_id),
-            "players": [str(p) for p in lobby.players],
-            "max_players": lobby.max_players,
-            "game_mode": lobby.game_mode.value,
-            "player_count": len(lobby.players)
-        })
+    # Note: Scanning all lobbies is not ideal for scaling, but good enough for now
+    async for key in redis_client.redis.scan_iter(match="lobby:*"):
+        key_str = key.decode()
+        if ":ready:" not in key_str:
+            lobby_data = await redis_client.get_state(key_str)
+            if lobby_data and isinstance(lobby_data, dict):
+                result.append({
+                    "id": lobby_data["id"],
+                    "name": lobby_data["name"],
+                    "host_id": lobby_data["host_id"],
+                    "players": lobby_data["players"],
+                    "max_players": lobby_data["max_players"],
+                    "game_mode": lobby_data["game_mode"],
+                    "player_count": len(lobby_data["players"])
+                })
     return {"lobbies": result}
 
 
@@ -362,45 +366,50 @@ async def handle_lobby_ready(data: dict):
     await lobby_manager.set_ready(lobby_id, player_id, ready)
     
     # Check if all ready
-    all_ready = await lobby_manager.is_lobby_ready(lobby_id)
-    
-    if all_ready:
-        # Prevent duplicate session creation by checking lobby status
-        lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
-        if lobby_data and lobby_data.get("is_ready"):
-            return # Already processing ready state
+    async with redis_client.lock(f"lobby_ready_check:{lobby_id}", timeout=5) as acquired:
+        if not acquired:
+            return
             
-        # Set is_ready to True
-        if lobby_data:
-            lobby_data["is_ready"] = True
-            await redis_client.set_state(f"lobby:{lobby_id}", lobby_data, expire=3600)
-            
-        # Emit lobby ready event
-        event = Event(
-            type=EventType.LOBBY_READY,
-            payload={"lobby_id": lobby_id}
-        )
-        await event_store.append(f"lobby:{lobby_id}", event)
+        all_ready = await lobby_manager.is_lobby_ready(lobby_id)
         
-        # Notify all players
-        if lobby_data:
-            lobby = Lobby(**lobby_data)
-            for pid in lobby.players:
-                await redis_client.publish("gateway:lobby_update", {
-                    "target_player_id": str(pid),
-                    "event_type": "lobby.all_ready",
-                    "payload": {
-                        "lobby_id": lobby_id,
-                        "message": "All players ready! Starting game..."
-                    }
+        if all_ready:
+            # Prevent duplicate session creation by checking lobby status
+            lobby_data = await redis_client.get_state(f"lobby:{lobby_id}")
+            if lobby_data and lobby_data.get("is_ready"):
+                return # Already processing ready state
+                
+            # Set is_ready to True
+            if lobby_data:
+                lobby_data["is_ready"] = True
+                await redis_client.set_state(f"lobby:{lobby_id}", lobby_data, expire=3600)
+                
+            # Emit lobby ready event
+            event = Event(
+                type=EventType.LOBBY_READY,
+                payload={"lobby_id": lobby_id}
+            )
+            await event_store.append(f"lobby:{lobby_id}", event)
+            
+            # Notify all players
+            if lobby_data:
+                lobby = Lobby(**lobby_data)
+                for pid in lobby.players:
+                    await redis_client.publish("gateway:lobby_update", {
+                        "target_player_id": str(pid),
+                        "event_type": "lobby.all_ready",
+                        "payload": {
+                            "lobby_id": lobby_id,
+                            "message": "All players ready! Starting game..."
+                        }
+                    })
+            
+                # Trigger game session creation
+                # Using pub/sub here is ok if GameSession handles it idempotently, but enqueue is safer
+                await redis_client.publish("session:create_from_lobby", {
+                    "lobby_id": lobby_id,
+                    "players": [str(p) for p in lobby.players],
+                    "game_mode": lobby.game_mode.value
                 })
-        
-            # Trigger game session creation
-            await redis_client.publish("session:create_from_lobby", {
-                "lobby_id": lobby_id,
-                "players": [str(p) for p in lobby.players],
-                "game_mode": lobby.game_mode.value
-            })
 
 
 async def handle_create_from_match(data: dict):
@@ -426,11 +435,12 @@ async def handle_create_from_match(data: dict):
     # Force add all other players to the lobby locally and in redis
     for player_id in players[1:]:
         lobby.players.append(player_id)
-        lobby_manager.player_lobbies[str(player_id)] = str(lobby.id)
         await redis_client.set_state(
             f"player:{player_id}:status",
-            {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": str(lobby.id)}
+            {"status": PlayerStatus.IN_LOBBY.value, "lobby_id": str(lobby.id)},
+            expire=300
         )
+        await redis_client.redis.set(f"player:{player_id}:lobby_id", str(lobby.id))
         
     # Save back to Redis
     await redis_client.set_state(
@@ -468,36 +478,36 @@ async def handle_create_from_match(data: dict):
 
 async def handle_player_disconnected(player_id: str):
     """Handle a player disconnect event."""
-    lobby_id = lobby_manager.player_lobbies.get(player_id)
-    if lobby_id:
+    lobby_id_bytes = await redis_client.redis.get(f"player:{player_id}:lobby_id")
+    if lobby_id_bytes:
+        lobby_id = lobby_id_bytes.decode()
         await handle_lobby_leave({"player_id": player_id, "lobby_id": lobby_id})
 
 
+async def process_task_queue(queue_name: str, handler_func):
+    """Consume a specific task queue and process it."""
+    while True:
+        try:
+            task = await redis_client.dequeue_task(queue_name, timeout=1)
+            if task:
+                await handler_func(task)
+        except Exception as e:
+            print(f"Error processing {queue_name}: {e}")
+            await asyncio.sleep(1)
+
 async def subscribe_to_requests():
-    """Subscribe to lobby requests."""
-    pubsub = await redis_client.subscribe("lobby:create", "lobby:join", "lobby:leave", "lobby:ready", "lobby:create_from_match")
+    """Subscribe to lobby requests via task queues."""
+    queues_handlers = {
+        "task:lobby:create": handle_lobby_create,
+        "task:lobby:join": handle_lobby_join,
+        "task:lobby:leave": handle_lobby_leave,
+        "task:lobby:ready": handle_lobby_ready,
+        "task:lobby:create_from_match": handle_create_from_match
+    }
     
-    # Also need pattern subscribe for disconnects, let's use a separate task for streams
-    
-    async for message in pubsub.listen():
-        if message["type"] == "message":
-            try:
-                data = json.loads(message["data"])
-                channel = message["channel"]
-                
-                if channel == "lobby:create":
-                    await handle_lobby_create(data)
-                elif channel == "lobby:join":
-                    await handle_lobby_join(data)
-                elif channel == "lobby:leave":
-                    await handle_lobby_leave(data)
-                elif channel == "lobby:ready":
-                    await handle_lobby_ready(data)
-                elif channel == "lobby:create_from_match":
-                    await handle_create_from_match(data)
-                    
-            except Exception as e:
-                print(f"Error processing lobby request: {e}")
+    # Start a background loop for each task queue
+    for queue_name, handler in queues_handlers.items():
+        asyncio.create_task(process_task_queue(queue_name, handler))
 
 async def subscribe_to_disconnects():
     """Subscribe to player disconnect events."""

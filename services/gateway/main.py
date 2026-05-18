@@ -285,7 +285,7 @@ async def handle_message(player_id: UUID, message: dict):
 # Message handlers that publish to Redis for other services
 async def handle_matchmaking_join(player_id: UUID, data: dict):
     """Forward matchmaking request."""
-    await redis_client.publish("matchmaking:requests", {
+    await redis_client.enqueue_task("task:matchmaking:requests", {
         "player_id": str(player_id),
         "game_mode": data.get("game_mode", "casual"),
         "rating": data.get("rating", 1000)
@@ -298,14 +298,14 @@ async def handle_matchmaking_join(player_id: UUID, data: dict):
 
 async def handle_matchmaking_cancel(player_id: UUID):
     """Cancel matchmaking."""
-    await redis_client.publish("matchmaking:cancel", {
+    await redis_client.enqueue_task("task:matchmaking:cancel", {
         "player_id": str(player_id)
     })
 
 
 async def handle_lobby_create(player_id: UUID, data: dict):
     """Forward lobby creation."""
-    await redis_client.publish("lobby:create", {
+    await redis_client.enqueue_task("task:lobby:create", {
         "player_id": str(player_id),
         "name": data.get("name", "New Lobby"),
         "game_mode": data.get("game_mode", "casual"),
@@ -315,7 +315,7 @@ async def handle_lobby_create(player_id: UUID, data: dict):
 
 async def handle_lobby_join(player_id: UUID, data: dict):
     """Forward lobby join request."""
-    await redis_client.publish("lobby:join", {
+    await redis_client.enqueue_task("task:lobby:join", {
         "player_id": str(player_id),
         "lobby_id": data.get("lobby_id")
     })
@@ -323,7 +323,7 @@ async def handle_lobby_join(player_id: UUID, data: dict):
 
 async def handle_lobby_leave(player_id: UUID, data: dict):
     """Forward lobby leave request."""
-    await redis_client.publish("lobby:leave", {
+    await redis_client.enqueue_task("task:lobby:leave", {
         "player_id": str(player_id),
         "lobby_id": data.get("lobby_id")
     })
@@ -331,7 +331,7 @@ async def handle_lobby_leave(player_id: UUID, data: dict):
 
 async def handle_lobby_ready(player_id: UUID, data: dict):
     """Forward ready status."""
-    await redis_client.publish("lobby:ready", {
+    await redis_client.enqueue_task("task:lobby:ready", {
         "player_id": str(player_id),
         "lobby_id": data.get("lobby_id"),
         "ready": data.get("ready", True)

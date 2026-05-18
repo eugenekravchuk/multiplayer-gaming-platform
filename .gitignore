@@ -61,3 +61,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# NPM
+node_modules/
+

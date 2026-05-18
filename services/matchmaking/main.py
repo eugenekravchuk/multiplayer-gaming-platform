@@ -1,13 +1,14 @@
 """
 Matchmaking Service - Handles player matchmaking with skill-based matching.
-Uses Redis pub/sub for real-time matchmaking requests.
+Uses Redis lists for reliable task distribution and Redis sets/hashes for shared state.
 """
 import asyncio
 import json
 import os
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
-from datetime import datetime, timedelta
+from datetime import datetime
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -19,73 +20,118 @@ from shared.types import MatchRequest, Match, GameMode
 from shared.events import Event, EventType, RedisEventStore
 
 
-app = FastAPI(title="Matchmaking Service", version="1.0.0")
-
-# Matchmaking queue: game_mode -> list of requests
-class MatchmakingQueue:
-    """Manages matchmaking queues per game mode."""
-    
-    def __init__(self):
-        self.queues: Dict[GameMode, List[MatchRequest]] = {
-            GameMode.CASUAL: [],
-            GameMode.RANKED: [],
-            GameMode.TOURNAMENT: [],
-            GameMode.CUSTOM: []
-        }
-        self.active_searches: Dict[str, MatchRequest] = {}  # player_id -> request
-    
-    def add_request(self, request: MatchRequest) -> bool:
-        """Add player to matchmaking queue."""
-        player_id_str = str(request.player_id)
-        
-        # Remove from queue if already searching
-        if player_id_str in self.active_searches:
-            self.remove_request(player_id_str)
-        
-        self.queues[request.game_mode].append(request)
-        self.active_searches[player_id_str] = request
-        
-        print(f"Player {request.player_id} joined {request.game_mode} queue. Queue size: {len(self.queues[request.game_mode])}")
-        return True
-    
-    def remove_request(self, player_id: str) -> bool:
-        """Remove player from matchmaking."""
-        if player_id not in self.active_searches:
-            return False
-        
-        request = self.active_searches[player_id]
-        if request in self.queues[request.game_mode]:
-            self.queues[request.game_mode].remove(request)
-        
-        del self.active_searches[player_id]
-        print(f"Player {player_id} removed from matchmaking")
-        return True
-    
-    def get_queue(self, game_mode: GameMode) -> List[MatchRequest]:
-        """Get queue for game mode."""
-        return self.queues[game_mode]
-
-
-queue = MatchmakingQueue()
 event_store: RedisEventStore = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    print("Matchmaking Service starting up...", flush=True)
+    global event_store
+    await redis_client.connect()
+    event_store = RedisEventStore(redis_client.redis)
+    
+    # Start background tasks
+    asyncio.create_task(subscribe_to_join_requests())
+    asyncio.create_task(subscribe_to_cancel_requests())
+    asyncio.create_task(run_matchmaker())
+    
+    # Register service
+    await redis_client.register_service(
+        "matchmaking",
+        os.getenv("HOSTNAME", str(uuid4())),
+        "0.0.0.0",
+        int(os.getenv("PORT", 3001))
+    )
+    print("Matchmaking Service ready and listening for tasks", flush=True)
+    
+    yield
+    
+    # Shutdown logic
+    await redis_client.disconnect()
+    print("Matchmaking Service shutdown", flush=True)
+
+
+app = FastAPI(title="Matchmaking Service", version="1.0.0", lifespan=lifespan)
+
+
+class DistributedMatchmakingQueue:
+    """Manages matchmaking queues per game mode using Redis."""
+    
+    async def add_request(self, request: MatchRequest) -> bool:
+        player_id_str = str(request.player_id)
+        game_mode_str = request.game_mode.value
+        
+        await self.remove_request(player_id_str)
+        
+        request_data = {
+            "player_id": player_id_str,
+            "game_mode": game_mode_str,
+            "rating": request.rating,
+            "region": request.region,
+            "created_at": request.created_at.isoformat()
+        }
+        await redis_client.redis.hset("matchmaking:active_requests", player_id_str, json.dumps(request_data))
+        await redis_client.redis.zadd(f"matchmaking:queue:{game_mode_str}", {player_id_str: request.created_at.timestamp()})
+        
+        print(f"DEBUG: Added {player_id_str} to {game_mode_str} queue", flush=True)
+        return True
+    
+    async def remove_request(self, player_id: str) -> bool:
+        request_data_str = await redis_client.redis.hget("matchmaking:active_requests", player_id)
+        if not request_data_str:
+            return False
+            
+        request_data = json.loads(request_data_str)
+        game_mode_str = request_data["game_mode"]
+        
+        await redis_client.redis.zrem(f"matchmaking:queue:{game_mode_str}", player_id)
+        await redis_client.redis.hdel("matchmaking:active_requests", player_id)
+        
+        print(f"DEBUG: Removed {player_id} from matchmaking queue", flush=True)
+        return True
+    
+    async def get_queue(self, game_mode: GameMode) -> List[MatchRequest]:
+        game_mode_str = game_mode.value
+        player_ids = await redis_client.redis.zrange(f"matchmaking:queue:{game_mode_str}", 0, -1)
+        
+        if not player_ids:
+            return []
+            
+        requests = []
+        for pid in player_ids:
+            req_data_str = await redis_client.redis.hget("matchmaking:active_requests", pid)
+            if req_data_str:
+                req_data = json.loads(req_data_str)
+                req = MatchRequest(
+                    player_id=UUID(req_data["player_id"]),
+                    game_mode=GameMode(req_data["game_mode"]),
+                    rating=req_data["rating"],
+                    region=req_data["region"]
+                )
+                req.created_at = datetime.fromisoformat(req_data["created_at"])
+                requests.append(req)
+            else:
+                await redis_client.redis.zrem(f"matchmaking:queue:{game_mode_str}", pid)
+                
+        return requests
+
+
+queue = DistributedMatchmakingQueue()
 
 
 class MatchmakingAlgorithm:
-    """Skill-based matchmaking algorithm."""
-    
-    # Rating difference thresholds ( widen over time )
     RATING_THRESHOLDS = [50, 100, 200, 400, 1000]
-    WAIT_TIME_MULTIPLIERS = [0, 10, 20, 30, 60]  # seconds
+    WAIT_TIME_MULTIPLIERS = [0, 10, 20, 30, 60]
     
     @staticmethod
     def can_match(p1: MatchRequest, p2: MatchRequest) -> bool:
-        """Check if two players can be matched."""
         if p1.game_mode != p2.game_mode:
             return False
         
-        # Check rating difference based on wait time
-        wait_time = (datetime.utcnow() - min(p1.created_at, p2.created_at)).total_seconds()
+        now = datetime.utcnow()
+        wait_time = max(0, (now - min(p1.created_at, p2.created_at)).total_seconds())
         
+        max_diff = MatchmakingAlgorithm.RATING_THRESHOLDS[0]
         for i, threshold in enumerate(MatchmakingAlgorithm.RATING_THRESHOLDS):
             if wait_time >= MatchmakingAlgorithm.WAIT_TIME_MULTIPLIERS[i]:
                 max_diff = threshold
@@ -93,12 +139,15 @@ class MatchmakingAlgorithm:
                 break
         
         rating_diff = abs(p1.rating - p2.rating)
-        return rating_diff <= max_diff
+        can_match = rating_diff <= max_diff
+        return can_match
     
     @staticmethod
-    def find_matches(game_mode: GameMode, players_per_match: int = 2) -> List[List[MatchRequest]]:
-        """Find compatible player groups."""
-        waiting = queue.get_queue(game_mode).copy()
+    async def find_matches(game_mode: GameMode, players_per_match: int = 2) -> List[List[MatchRequest]]:
+        waiting = await queue.get_queue(game_mode)
+        if len(waiting) >= 2:
+            print(f"DEBUG: Processing {len(waiting)} players in {game_mode.value} queue", flush=True)
+            
         matches = []
         used = set()
         
@@ -106,7 +155,6 @@ class MatchmakingAlgorithm:
             if str(player.player_id) in used:
                 continue
             
-            # Find compatible players
             group = [player]
             for other in waiting:
                 if len(group) >= players_per_match:
@@ -119,49 +167,21 @@ class MatchmakingAlgorithm:
                     group.append(other)
                     used.add(other_id)
             
-            if len(group) >= 2:  # Minimum 2 players
+            if len(group) >= players_per_match:
                 matches.append(group)
-                used.add(str(player.player_id))
-                
-                # Remove matched players from queue
                 for p in group:
-                    queue.remove_request(str(p.player_id))
+                    used.add(str(p.player_id))
+                    await queue.remove_request(str(p.player_id))
         
         return matches
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    queue_sizes = {mode.value: len(queue.get_queue(mode)) for mode in GameMode}
-    return {
-        "status": "healthy", 
-        "service": "matchmaking",
-        "active_searches": len(queue.active_searches),
-        "queues": queue_sizes
-    }
-
-
-@app.get("/stats")
-async def get_stats():
-    """Get matchmaking statistics."""
-    return {
-        "queues": {
-            mode.value: [
-                {
-                    "player_id": str(req.player_id),
-                    "rating": req.rating,
-                    "wait_time": (datetime.utcnow() - req.created_at).total_seconds()
-                }
-                for req in queue.get_queue(mode)
-            ]
-            for mode in GameMode
-        }
-    }
+    return {"status": "healthy", "service": "matchmaking"}
 
 
 async def handle_matchmaking_request(data: dict):
-    """Process matchmaking join request."""
     player_id = UUID(data["player_id"])
     game_mode = GameMode(data.get("game_mode", "casual"))
     rating = data.get("rating", 1000)
@@ -173,25 +193,17 @@ async def handle_matchmaking_request(data: dict):
         region=data.get("region", "default")
     )
     
-    # Emit event
     event = Event(
         type=EventType.MATCHMAKING_JOINED,
-        payload={
-            "player_id": str(player_id),
-            "game_mode": game_mode.value,
-            "rating": rating
-        }
+        payload={"player_id": str(player_id), "game_mode": game_mode.value, "rating": rating}
     )
     await event_store.append(f"matchmaking:{player_id}", event)
-    
-    # Add to queue
-    queue.add_request(request)
+    await queue.add_request(request)
 
 
 async def handle_matchmaking_cancel(data: dict):
-    """Process matchmaking cancel request."""
     player_id = data["player_id"]
-    queue.remove_request(player_id)
+    await queue.remove_request(player_id)
     
     event = Event(
         type=EventType.MATCHMAKING_CANCELLED,
@@ -201,19 +213,15 @@ async def handle_matchmaking_cancel(data: dict):
 
 
 async def create_match(players: List[MatchRequest]) -> Match:
-    """Create a match from matched players."""
     match_id = uuid4()
-    
     match = Match(
         id=match_id,
         players=[p.player_id for p in players],
         game_mode=players[0].game_mode
     )
     
-    # Store match in Redis
     await redis_client.set_state(f"match:{match_id}", match.model_dump(mode="json"), expire=3600)
     
-    # Emit match found event
     event = Event(
         type=EventType.MATCH_FOUND,
         payload={
@@ -224,14 +232,12 @@ async def create_match(players: List[MatchRequest]) -> Match:
     )
     await event_store.append(f"match:{match_id}", event)
     
-    # Request lobby creation automatically
-    await redis_client.publish("lobby:create_from_match", {
+    await redis_client.enqueue_task("task:lobby:create_from_match", {
         "match_id": str(match_id),
         "players": [str(p.player_id) for p in players],
         "game_mode": players[0].game_mode.value
     })
     
-    # Notify players via gateway
     for player in players:
         await redis_client.publish("gateway:match_found", {
             "target_player_id": str(player.player_id),
@@ -243,73 +249,48 @@ async def create_match(players: List[MatchRequest]) -> Match:
             }
         })
     
-    print(f"Match {match_id} created with {len(players)} players")
+    print(f"SUCCESS: Match {match_id} created for {len(players)} players", flush=True)
     return match
 
 
 async def run_matchmaker():
-    """Background task: continuously run matchmaking algorithm."""
+    print("Matchmaking loop background task started", flush=True)
     while True:
         try:
             for game_mode in [GameMode.CASUAL, GameMode.RANKED]:
-                matches = MatchmakingAlgorithm.find_matches(game_mode, players_per_match=2)
-                
-                for player_group in matches:
-                    await create_match(player_group)
-            
-            await asyncio.sleep(2)  # Run every 2 seconds
-            
+                async with redis_client.lock(f"matchmaking_{game_mode.value}", timeout=5, wait=False) as acquired:
+                    if acquired:
+                        matches = await MatchmakingAlgorithm.find_matches(game_mode, players_per_match=2)
+                        for player_group in matches:
+                            await create_match(player_group)
+            await asyncio.sleep(2)
         except Exception as e:
-            print(f"Matchmaking error: {e}")
+            print(f"ERROR in run_matchmaker: {e}", flush=True)
             await asyncio.sleep(5)
 
 
-async def subscribe_to_requests():
-    """Subscribe to matchmaking requests from Redis."""
-    pubsub = await redis_client.subscribe("matchmaking:requests", "matchmaking:cancel")
-    
-    async for message in pubsub.listen():
-        if message["type"] == "message":
-            try:
-                data = json.loads(message["data"])
-                channel = message["channel"]
-                
-                if channel == "matchmaking:requests":
-                    await handle_matchmaking_request(data)
-                elif channel == "matchmaking:cancel":
-                    await handle_matchmaking_cancel(data)
-                    
-            except Exception as e:
-                print(f"Error processing request: {e}")
+async def subscribe_to_join_requests():
+    print("Task worker: join_requests started", flush=True)
+    while True:
+        try:
+            task = await redis_client.dequeue_task("task:matchmaking:requests", timeout=1)
+            if task:
+                print(f"DEBUG: Processing join request for {task.get('player_id')}", flush=True)
+                await handle_matchmaking_request(task)
+        except Exception as e:
+            print(f"ERROR in join_requests worker: {e}", flush=True)
+            await asyncio.sleep(1)
 
-
-@app.on_event("startup")
-async def startup():
-    """Initialize on startup."""
-    global event_store
-    await redis_client.connect()
-    event_store = RedisEventStore(redis_client.redis)
-    
-    # Start background tasks
-    asyncio.create_task(subscribe_to_requests())
-    asyncio.create_task(run_matchmaker())
-    
-    # Register service
-    await redis_client.register_service(
-        "matchmaking",
-        os.getenv("HOSTNAME", "matchmaking-1"),
-        "0.0.0.0",
-        int(os.getenv("PORT", 3001))
-    )
-    
-    print("Matchmaking Service started")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup on shutdown."""
-    await redis_client.disconnect()
-    print("Matchmaking Service shutdown")
+async def subscribe_to_cancel_requests():
+    print("Task worker: cancel_requests started", flush=True)
+    while True:
+        try:
+            task = await redis_client.dequeue_task("task:matchmaking:cancel", timeout=1)
+            if task:
+                await handle_matchmaking_cancel(task)
+        except Exception as e:
+            print(f"ERROR in cancel_requests worker: {e}", flush=True)
+            await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
