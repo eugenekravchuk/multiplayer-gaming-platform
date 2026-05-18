@@ -140,7 +140,3 @@ Requires Docker & Docker Compose. All services start automatically.
     ├── chat/              # :3005
     └── notification/      # :3006
 ```
-
-## License
-
-MIT
